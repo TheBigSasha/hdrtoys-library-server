@@ -1,0 +1,34 @@
+{
+  "name": "hdrtoys-library-server",
+  "version": "0.1.0",
+  "description": "Tiny, zero-dependency local-filesystem library server exposing the hdr.toys host-gallery integration API so hdr.toys can open, edit, and save back to a folder of photos on your own machine.",
+  "type": "module",
+  "keywords": [
+    "hdr.toys",
+    "hdr",
+    "gain-map",
+    "ultrahdr",
+    "photo-library",
+    "self-hosted"
+  ],
+  "homepage": "https://github.com/TheBigSasha/hdrtoys-library-server#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TheBigSasha/hdrtoys-library-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TheBigSasha/hdrtoys-library-server/issues"
+  },
+  "author": "Sasha Aleshchenko",
+  "bin": {
+    "hdrtoys-library-server": "./bin/hdrtoys-library-server.js"
+  },
+  "scripts": {
+    "start": "node ./bin/hdrtoys-library-server.js",
+    "test": "node ./test/smoke.test.js && node ./test/photos.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

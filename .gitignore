@@ -1,0 +1,6 @@
+node_modules/
+npm-debug.log*
+.DS_Store
+# local edit sidecars created when serving a library
+.hdrtoys/
+*.photoslibrary.hdrtoys/
