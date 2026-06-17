@@ -31,17 +31,31 @@ The protocol's minimum self-hostable subset
 | `GET /assets` (paginated list) | §3.1 | ✅ |
 | `GET /assets/{id}` | §3.2 | ✅ |
 | `GET /assets/{id}/raw` (original bytes) | §3.3 / §1.1 | ✅ |
+| `GET /assets/{id}/thumb` (renderable preview) | §3.1 `thumbnailUrl` | ✅ |
+| `GET /assets?kind=raw` (filter by kind) | §3.1 | ✅ |
 | `GET /assets/{id}/recipe` (restore edit) | §3.4 | ✅ |
 | `POST /hdrtoys/callback/snapshot` (save edit) | §2.1 | ✅ (seq-monotonic) |
 | `POST /hdrtoys/callback/render` (save export) | §2.2 | ✅ |
 | `GET /hdrtoys/callback/capabilities` | §2.5 | ✅ |
 | CORS + `OPTIONS` preflight, optional bearer token | §1.3 / §2.3 | ✅ |
 
+**Thumbnails.** `thumbnailUrl` points at `GET /assets/{id}/thumb`, which returns
+a browser-renderable preview **inline** (no forced download):
+
+- **JPEG / PNG / WebP / GIF / AVIF** → the original bytes (a browser renders
+  them directly). Still zero-dependency: there's no decoder to downscale, so the
+  preview is full resolution. Fine for local use; add a thumbnailer (e.g.
+  `sharp`) if you want smaller transfers for huge libraries.
+- **RAW** (`.arw/.cr2/.cr3/.nef/.dng/…`) → the JPEG preview **embedded** in the
+  RAW is extracted with a zero-dep marker scan and cached at
+  `<sidecar>/<id>.thumb.jpg`, so it's only extracted once. (A browser can't
+  decode raw sensor data, so without this RAW files would show as blank
+  placeholders.)
+- **EXR** → no thumbnail (needs tone mapping a browser won't do); the route
+  returns 404 and the editor shows a placeholder.
+
 **Deferred / not yet implemented** (documented so you know what's missing):
 
-- **Thumbnails** (§3.1 `thumbnailUrl`). The server has no image decoder
-  (zero-dep), so `thumbnailUrl` points at the full-res `raw` route. Fine for
-  small libraries; add a thumbnailer (e.g. `sharp`) for large ones.
 - **`hasGainMap` detection** is always `false` (no JPEG/MPF parsing). hdr.toys
   still extracts an embedded gain map on ingest regardless.
 - **Variants / history** (§3.5), **rating/flag** filtering and writes
@@ -223,6 +237,8 @@ that with `--dir`. Edits then land in that folder's own `.hdrtoys/` sidecar.
 - **Recipes** → `<sidecar>/<id>.recipe.json` (latest only; older `seq`s for the
   same client are dropped per protocol §2.4).
 - **Renders** → `<sidecar>/<id>.renders/<filename>`.
+- **RAW thumbnail cache** → `<sidecar>/<id>.thumb.jpg` (the extracted embedded
+  preview; safe to delete, it's regenerated on demand).
 - **Sidecar location.** For a plain folder it's `<root>/.hdrtoys/`. For a macOS
   Photos library it's `<library-name>.photoslibrary.hdrtoys/` *beside* the
   package, so the library itself stays untouched.

@@ -23,12 +23,16 @@ import {
     describeAsset,
     resolveAssetPath,
     mimeOf,
+    kindOf,
+    isRawImage,
+    isRenderableRaster,
     saveRecipe,
     loadRecipe,
     saveRender,
     decodeId,
     defaultSidecarRoot,
 } from './library.js';
+import { rawThumbnail } from './thumbnail.js';
 import { parseMultipart } from './multipart.js';
 
 const SCHEMA_VERSION = 1;
@@ -105,7 +109,7 @@ export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kin
                     schemaVersion: SCHEMA_VERSION,
                     root,
                     kind,
-                    endpoints: ['/assets', '/assets/{id}', '/assets/{id}/raw', '/assets/{id}/recipe',
+                    endpoints: ['/assets', '/assets/{id}', '/assets/{id}/raw', '/assets/{id}/thumb', '/assets/{id}/recipe',
                         '/hdrtoys/callback/snapshot', '/hdrtoys/callback/render', '/hdrtoys/callback/capabilities'],
                 }, cors);
                 return;
@@ -123,6 +127,10 @@ export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kin
                 const sub = segs[2];
                 if (req.method === 'GET' && segs.length === 2) {
                     await handleSingle(root, sidecarRoot, id, origin, res, cors);
+                    return;
+                }
+                if (req.method === 'GET' && sub === 'thumb' && segs.length === 3) {
+                    await handleThumb(root, sidecarRoot, id, res, cors);
                     return;
                 }
                 if (req.method === 'GET' && sub === 'raw' && segs.length === 3) {
@@ -174,7 +182,15 @@ async function handleList(url, root, sidecarRoot, origin, res, cors) {
         } catch { offset = 0; }
     }
 
-    const rels = await scanLibrary(root);
+    // Optional `kind` filter (§3.1): comma-separated list e.g. "raw" or "raw,exr".
+    // Applied before pagination so the cursor stays consistent across the filtered set.
+    const kindParam = url.searchParams.get('kind');
+    const kinds = kindParam
+        ? new Set(kindParam.split(',').map((k) => k.trim().toLowerCase()).filter(Boolean))
+        : null;
+
+    let rels = await scanLibrary(root);
+    if (kinds && kinds.size) rels = rels.filter((rel) => kinds.has(kindOf(rel)));
     const page = rels.slice(offset, offset + limit);
     const assets = (await Promise.all(page.map((rel) => describeAsset(root, rel, origin, sidecarRoot)))).filter(Boolean);
     const nextOffset = offset + limit;
@@ -212,6 +228,51 @@ async function handleRaw(root, id, res, cors) {
         'Cache-Control': 'private, max-age=60',
     });
     createReadStream(abs).pipe(res);
+}
+
+// GET /assets/{id}/thumb — a browser-renderable preview, served INLINE (no
+// attachment disposition, so it renders in an <img>):
+//   • JPEG/PNG/WebP/GIF/AVIF → the original bytes (a browser renders them as-is).
+//   • RAW                    → the embedded JPEG preview, extracted + cached.
+//   • EXR / no preview       → 404 (the editor shows a placeholder).
+async function handleThumb(root, sidecarRoot, id, res, cors) {
+    const abs = resolveAssetPath(root, id);
+    if (!abs) { sendJson(res, 400, { error: 'bad id' }, cors); return; }
+    let stat;
+    try {
+        stat = await fs.stat(abs);
+    } catch {
+        sendJson(res, 404, { error: 'no such asset' }, cors);
+        return;
+    }
+    const name = path.basename(abs);
+
+    if (isRenderableRaster(name)) {
+        res.writeHead(200, {
+            ...cors,
+            'Content-Type': mimeOf(name),
+            'Content-Length': String(stat.size),
+            'Cache-Control': 'private, max-age=300',
+        });
+        createReadStream(abs).pipe(res);
+        return;
+    }
+
+    if (isRawImage(name)) {
+        const bytes = await rawThumbnail(abs, sidecarRoot, id);
+        if (!bytes) { sendJson(res, 404, { error: 'no embedded preview' }, cors); return; }
+        res.writeHead(200, {
+            ...cors,
+            'Content-Type': 'image/jpeg',
+            'Content-Length': String(bytes.length),
+            'Cache-Control': 'private, max-age=300',
+        });
+        res.end(bytes);
+        return;
+    }
+
+    // EXR and anything else: no cheap renderable thumbnail.
+    sendJson(res, 404, { error: 'no thumbnail for this type' }, cors);
 }
 
 async function handleRecipeGet(sidecarRoot, id, res, cors) {

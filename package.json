@@ -1,6 +1,6 @@
 {
   "name": "hdrtoys-library-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Tiny, zero-dependency local-filesystem library server exposing the hdr.toys host-gallery integration API so hdr.toys can open, edit, and save back to a folder of photos on your own machine.",
   "type": "module",
   "keywords": [
@@ -25,7 +25,7 @@
   },
   "scripts": {
     "start": "node ./bin/hdrtoys-library-server.js",
-    "test": "node ./test/smoke.test.js && node ./test/photos.test.js"
+    "test": "node ./test/smoke.test.js && node ./test/photos.test.js && node ./test/thumb.test.js"
   },
   "engines": {
     "node": ">=18"

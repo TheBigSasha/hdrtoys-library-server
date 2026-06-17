@@ -40,6 +40,19 @@ export function isSupportedImage(name) {
     return RASTER_EXT.has(ext) || EXR_EXT.has(ext) || RAW_EXT.has(ext);
 }
 
+/** True if this is a RAW camera file (needs embedded-preview extraction to show
+ *  a thumbnail, since a browser <img> can't decode the raw sensor data). */
+export function isRawImage(name) {
+    return RAW_EXT.has(extOf(name));
+}
+
+/** True if a browser <img> can render the original bytes directly (so the
+ *  thumbnail can just be the file itself). EXR is excluded — it needs tone
+ *  mapping the browser won't do. */
+export function isRenderableRaster(name) {
+    return RASTER_EXT.has(extOf(name));
+}
+
 /** Protocol `kind` for an asset (§3.1). RAW/EXR are first-class; rest is jpeg/png. */
 export function kindOf(name) {
     const ext = extOf(name);
@@ -135,9 +148,9 @@ export async function describeAsset(root, relPath, origin, sidecarRoot) {
     return {
         id,
         name,
-        // No server-side thumbnailer (zero-dep): the editor falls back to the
-        // full-res rawUrl for previews. A real deployment can add a thumb route.
-        thumbnailUrl: `${origin}/assets/${id}/raw`,
+        // /thumb serves a browser-renderable preview: the original bytes inline
+        // for JPEG/PNG/WebP/etc, or the embedded JPEG extracted from a RAW file.
+        thumbnailUrl: `${origin}/assets/${id}/thumb`,
         rawUrl: `${origin}/assets/${id}/raw`,
         recipeUrl: `${origin}/assets/${id}/recipe`,
         kind: kindOf(relPath),
