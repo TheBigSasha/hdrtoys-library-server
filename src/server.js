@@ -45,6 +45,13 @@ function corsHeaders(allowOrigin) {
             'Authorization, Content-Type, X-HDRToys-Image-Id, X-HDRToys-Channel, X-HDRToys-Schema-Version',
         'Access-Control-Expose-Headers': 'Content-Disposition',
         'Access-Control-Max-Age': '86400',
+        // hdr.toys sets COEP: require-corp (for SharedArrayBuffer/WASM). Under
+        // that policy a cross-origin <img> (a no-cors subresource load) is
+        // BLOCKED unless the response opts in with CORP. Without this header the
+        // editor's library thumbnails silently fail to load even though the JSON
+        // asset list (a CORS fetch) succeeds. 'cross-origin' lets any embedder
+        // use our bytes — fine for a self-hosted, user-launched local server.
+        'Cross-Origin-Resource-Policy': 'cross-origin',
     };
 }
 

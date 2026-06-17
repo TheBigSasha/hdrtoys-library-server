@@ -69,6 +69,12 @@ async function main() {
         assert.equal(buf.length, jpeg.length);
     });
 
+    await t('thumb sends CORP so a COEP embedder can load the <img>', async () => {
+        const id = encodeId('photo.jpg');
+        const r = await fetch(`${base}/assets/${id}/thumb`);
+        assert.equal(r.headers.get('cross-origin-resource-policy'), 'cross-origin');
+    });
+
     await t('RAW thumb extracts the embedded preview and caches it', async () => {
         const id = encodeId('capture.arw');
         const r = await fetch(`${base}/assets/${id}/thumb`);
