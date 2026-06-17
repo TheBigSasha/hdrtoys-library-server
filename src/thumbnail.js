@@ -47,6 +47,32 @@ export function thumbCachePath(sidecarRoot, id) {
     return path.join(sidecarRoot, `${id}.thumb.jpg`);
 }
 
+/** Where an OS-generated ("system") thumbnail is cached (PNG per asset id). */
+export function sysThumbCachePath(sidecarRoot, id) {
+    return path.join(sidecarRoot, `${id}.systhumb.png`);
+}
+
+/**
+ * Return an already-cached thumbnail for an asset, or null. Checks both the RAW
+ * embedded-preview cache (JPEG) and the system-thumbnail cache (PNG) so a thumb
+ * is generated at most once per file.
+ */
+export async function readCachedThumb(sidecarRoot, id) {
+    const jpg = thumbCachePath(sidecarRoot, id);
+    try { return { bytes: await fs.readFile(jpg), contentType: 'image/jpeg' }; } catch { /* none */ }
+    const png = sysThumbCachePath(sidecarRoot, id);
+    try { return { bytes: await fs.readFile(png), contentType: 'image/png' }; } catch { /* none */ }
+    return null;
+}
+
+/** Persist an OS-generated thumbnail (PNG) for an asset. Best-effort. */
+export async function cacheSysThumb(sidecarRoot, id, bytes) {
+    try {
+        await fs.mkdir(sidecarRoot, { recursive: true });
+        await fs.writeFile(sysThumbCachePath(sidecarRoot, id), bytes);
+    } catch { /* caching is best-effort */ }
+}
+
 /**
  * Resolve a thumbnail for a RAW file: serve the cached preview if present,
  * otherwise extract it from the RAW, cache it, and return the bytes. Returns a

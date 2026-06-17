@@ -1,6 +1,6 @@
 {
   "name": "hdrtoys-library-server",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Tiny, zero-dependency local-filesystem library server exposing the hdr.toys host-gallery integration API so hdr.toys can open, edit, and save back to a folder of photos on your own machine.",
   "type": "module",
   "keywords": [

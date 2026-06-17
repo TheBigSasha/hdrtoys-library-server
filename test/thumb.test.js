@@ -50,7 +50,9 @@ async function main() {
     await fs.writeFile(path.join(root, 'capture.arw'), Buffer.concat([Buffer.alloc(64, 0), preview, Buffer.alloc(32, 0)]));
     await fs.writeFile(path.join(root, 'scene.exr'), Buffer.from([0x76, 0x2f, 0x31, 0x01, 9, 9]));
 
-    const server = createServer({ root });
+    // Disable OS thumbnails so these assert the embedded/raster/EXR fallback
+    // logic deterministically (no qlmanage/PowerShell/gdk spawns).
+    const server = createServer({ root, systemThumbnails: false });
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
     const base = `http://127.0.0.1:${server.address().port}`;
 

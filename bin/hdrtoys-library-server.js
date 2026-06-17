@@ -14,7 +14,7 @@ import { createServer } from '../src/server.js';
 import { resolveLibrary } from '../src/photos.js';
 
 function parseArgs(argv) {
-    const out = { dir: process.cwd(), port: 4317, host: '0.0.0.0', token: null, origin: '*', photos: false };
+    const out = { dir: process.cwd(), port: 4317, host: '0.0.0.0', token: null, origin: '*', photos: false, systemThumbnails: true };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (a === '--dir' || a === '-d') out.dir = argv[++i];
@@ -23,6 +23,7 @@ function parseArgs(argv) {
         else if (a === '--token' || a === '-t') out.token = argv[++i];
         else if (a === '--origin' || a === '-o') out.origin = argv[++i];
         else if (a === '--photos') out.photos = true;
+        else if (a === '--no-system-thumbnails') out.systemThumbnails = false;
         else if (a === '--help' || a === '-h') { out.help = true; }
     }
     return out;
@@ -38,6 +39,7 @@ function printHelp() {
   --host        <addr>    bind address              (default: 0.0.0.0)
   --token,  -t  <secret>  require Bearer <secret>   (default: none)
   --origin, -o  <origin>  CORS Allow-Origin         (default: *)
+  --no-system-thumbnails  don't use OS thumbnails (QuickLook/Shell/gdk)
   --help,   -h           show this help
 `);
 }
@@ -69,6 +71,7 @@ async function main() {
         kind: lib.kind,
         token: opts.token,
         allowOrigin: opts.origin,
+        systemThumbnails: opts.systemThumbnails,
     });
     server.listen(opts.port, opts.host, () => {
         const lan = firstNonInternalIPv4();

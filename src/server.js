@@ -32,7 +32,8 @@ import {
     decodeId,
     defaultSidecarRoot,
 } from './library.js';
-import { rawThumbnail } from './thumbnail.js';
+import { rawThumbnail, readCachedThumb, cacheSysThumb } from './thumbnail.js';
+import { systemThumbnail } from './systemThumbnail.js';
 import { parseMultipart } from './multipart.js';
 
 const SCHEMA_VERSION = 1;
@@ -86,9 +87,10 @@ async function readBody(req, limitBytes) {
  *   kind         library kind label for the health route ('folder' | 'macos-photos')
  *   token        optional bearer token; when set, every request must carry it
  *   allowOrigin  CORS Allow-Origin value (default '*')
+ *   systemThumbnails  use OS thumbnails (QuickLook/Shell/gdk) for previews (default true)
  *   maxSnapshotBytes / maxRenderBytes  request body caps
  */
-export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kind = 'folder', token = null, allowOrigin = '*', maxSnapshotBytes = 16 * 1024 * 1024, maxRenderBytes = 256 * 1024 * 1024 }) {
+export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kind = 'folder', token = null, allowOrigin = '*', systemThumbnails = true, maxSnapshotBytes = 16 * 1024 * 1024, maxRenderBytes = 256 * 1024 * 1024 }) {
     const cors = corsHeaders(allowOrigin);
 
     return http.createServer(async (req, res) => {
@@ -137,7 +139,7 @@ export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kin
                     return;
                 }
                 if (req.method === 'GET' && sub === 'thumb' && segs.length === 3) {
-                    await handleThumb(root, sidecarRoot, id, res, cors);
+                    await handleThumb(root, sidecarRoot, id, res, cors, systemThumbnails);
                     return;
                 }
                 if (req.method === 'GET' && sub === 'raw' && segs.length === 3) {
@@ -237,12 +239,24 @@ async function handleRaw(root, id, res, cors) {
     createReadStream(abs).pipe(res);
 }
 
-// GET /assets/{id}/thumb — a browser-renderable preview, served INLINE (no
-// attachment disposition, so it renders in an <img>):
-//   • JPEG/PNG/WebP/GIF/AVIF → the original bytes (a browser renders them as-is).
-//   • RAW                    → the embedded JPEG preview, extracted + cached.
-//   • EXR / no preview       → 404 (the editor shows a placeholder).
-async function handleThumb(root, sidecarRoot, id, res, cors) {
+// GET /assets/{id}/thumb — a small, browser-renderable preview, served INLINE
+// (no attachment disposition, so it renders in an <img>). Priority:
+//   1. cached thumbnail (generated once, reused),
+//   2. RAW           → the JPEG preview embedded in the file,
+//   3. system        → the OS thumbnail (QuickLook / Shell / gdk-pixbuf),
+//   4. raster        → the original bytes as a last resort (full-res),
+//   5. otherwise     → 404 (the editor shows a placeholder).
+function serveThumb(res, cors, contentType, bytes) {
+    res.writeHead(200, {
+        ...cors,
+        'Content-Type': contentType,
+        'Content-Length': String(bytes.length),
+        'Cache-Control': 'private, max-age=300',
+    });
+    res.end(bytes);
+}
+
+async function handleThumb(root, sidecarRoot, id, res, cors, systemThumbnails) {
     const abs = resolveAssetPath(root, id);
     if (!abs) { sendJson(res, 400, { error: 'bad id' }, cors); return; }
     let stat;
@@ -254,6 +268,27 @@ async function handleThumb(root, sidecarRoot, id, res, cors) {
     }
     const name = path.basename(abs);
 
+    // 1. Already generated? Serve the cached thumbnail.
+    const cached = await readCachedThumb(sidecarRoot, id);
+    if (cached) { serveThumb(res, cors, cached.contentType, cached.bytes); return; }
+
+    // 2. RAW → embedded JPEG preview (fast, dependency-free; rawThumbnail caches it).
+    if (isRawImage(name)) {
+        const bytes = await rawThumbnail(abs, sidecarRoot, id);
+        if (bytes) { serveThumb(res, cors, 'image/jpeg', bytes); return; }
+    }
+
+    // 3. OS-generated thumbnail (small; covers raster, EXR, RAW-without-preview).
+    if (systemThumbnails) {
+        const sys = await systemThumbnail(abs);
+        if (sys) {
+            await cacheSysThumb(sidecarRoot, id, sys.bytes);
+            serveThumb(res, cors, sys.contentType, sys.bytes);
+            return;
+        }
+    }
+
+    // 4. Raster fallback → the original bytes inline (always works, just larger).
     if (isRenderableRaster(name)) {
         res.writeHead(200, {
             ...cors,
@@ -265,20 +300,7 @@ async function handleThumb(root, sidecarRoot, id, res, cors) {
         return;
     }
 
-    if (isRawImage(name)) {
-        const bytes = await rawThumbnail(abs, sidecarRoot, id);
-        if (!bytes) { sendJson(res, 404, { error: 'no embedded preview' }, cors); return; }
-        res.writeHead(200, {
-            ...cors,
-            'Content-Type': 'image/jpeg',
-            'Content-Length': String(bytes.length),
-            'Cache-Control': 'private, max-age=300',
-        });
-        res.end(bytes);
-        return;
-    }
-
-    // EXR and anything else: no cheap renderable thumbnail.
+    // 5. EXR/etc with no system thumbnail: nothing renderable.
     sendJson(res, 404, { error: 'no thumbnail for this type' }, cors);
 }
 
