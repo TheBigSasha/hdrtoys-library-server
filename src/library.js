@@ -128,7 +128,7 @@ export async function scanLibrary(root) {
  *  `origin` is the public base URL (e.g. http://host:4317) used to form the
  *  absolute rawUrl/recipeUrl the editor will fetch. `sidecarRoot` is where
  *  recipes/renders live (may be outside `root`, e.g. for a Photos library). */
-export async function describeAsset(root, relPath, origin, sidecarRoot) {
+export async function describeAsset(root, relPath, origin, sidecarRoot, token) {
     const id = encodeId(relPath);
     const abs = path.resolve(root, relPath);
     let stat;
@@ -145,14 +145,19 @@ export async function describeAsset(root, relPath, origin, sidecarRoot) {
         editedByHdrToys = true;
     } catch { /* no recipe yet */ }
 
+    // When a token is configured, bake it into the asset URLs as a query param.
+    // The editor loads thumbnails via <img src> and downloads via plain GETs that
+    // can't carry an Authorization header, so the token has to travel in the URL
+    // (checkAuth accepts ?gallery_token=). Safe for a local, user-launched server.
+    const q = token ? `?gallery_token=${encodeURIComponent(token)}` : '';
     return {
         id,
         name,
         // /thumb serves a browser-renderable preview: the original bytes inline
         // for JPEG/PNG/WebP/etc, or the embedded JPEG extracted from a RAW file.
-        thumbnailUrl: `${origin}/assets/${id}/thumb`,
-        rawUrl: `${origin}/assets/${id}/raw`,
-        recipeUrl: `${origin}/assets/${id}/recipe`,
+        thumbnailUrl: `${origin}/assets/${id}/thumb${q}`,
+        rawUrl: `${origin}/assets/${id}/raw${q}`,
+        recipeUrl: `${origin}/assets/${id}/recipe${q}`,
         kind: kindOf(relPath),
         hasGainMap: false, // unknown without parsing; conservative default
         capturedAt: stat.mtime.toISOString(),

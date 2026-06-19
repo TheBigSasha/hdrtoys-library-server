@@ -62,10 +62,14 @@ function sendJson(res, status, body, baseHeaders) {
     res.end(payload);
 }
 
-function checkAuth(req, token) {
+function checkAuth(req, url, token) {
     if (!token) return true; // no token configured → open (local-only default)
     const header = req.headers['authorization'] || '';
-    return header === `Bearer ${token}`;
+    if (header === `Bearer ${token}`) return true;
+    // Also accept the token as a query param: resources loaded WITHOUT custom headers
+    // — <img src> thumbnails, <a download> — can't send Authorization, so they carry
+    // ?gallery_token=… instead (the editor bakes it into the URLs we hand back).
+    return url.searchParams.get('gallery_token') === token;
 }
 
 async function readBody(req, limitBytes) {
@@ -103,10 +107,16 @@ export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kin
             }
 
             const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-            const origin = `http://${req.headers.host || 'localhost'}`;
+            // Honor reverse-proxy forwarding (e.g. `tailscale serve`) so the asset URLs
+            // we hand back use the scheme/host the client actually reached us on. Without
+            // this an https:// editor (a phone on hdr.toys over a tailnet) receives http://
+            // URLs and the browser blocks them as mixed content.
+            const fwdProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+            const fwdHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+            const origin = `${fwdProto || 'http'}://${fwdHost || req.headers.host || 'localhost'}`;
             const segs = url.pathname.split('/').filter(Boolean);
 
-            if (!checkAuth(req, token)) {
+            if (!checkAuth(req, url, token)) {
                 sendJson(res, 401, { error: 'unauthorized' }, cors);
                 return;
             }
@@ -126,7 +136,7 @@ export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kin
 
             // GET /assets — paginated list (§3.1)
             if (req.method === 'GET' && segs.length === 1 && segs[0] === 'assets') {
-                await handleList(url, root, sidecarRoot, origin, res, cors);
+                await handleList(url, root, sidecarRoot, origin, token, res, cors);
                 return;
             }
 
@@ -135,7 +145,7 @@ export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kin
                 const id = segs[1];
                 const sub = segs[2];
                 if (req.method === 'GET' && segs.length === 2) {
-                    await handleSingle(root, sidecarRoot, id, origin, res, cors);
+                    await handleSingle(root, sidecarRoot, id, origin, token, res, cors);
                     return;
                 }
                 if (req.method === 'GET' && sub === 'thumb' && segs.length === 3) {
@@ -181,7 +191,7 @@ export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kin
     });
 }
 
-async function handleList(url, root, sidecarRoot, origin, res, cors) {
+async function handleList(url, root, sidecarRoot, origin, token, res, cors) {
     const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 200, 1), 200);
     const cursor = url.searchParams.get('cursor');
     let offset = 0;
@@ -201,7 +211,7 @@ async function handleList(url, root, sidecarRoot, origin, res, cors) {
     let rels = await scanLibrary(root);
     if (kinds && kinds.size) rels = rels.filter((rel) => kinds.has(kindOf(rel)));
     const page = rels.slice(offset, offset + limit);
-    const assets = (await Promise.all(page.map((rel) => describeAsset(root, rel, origin, sidecarRoot)))).filter(Boolean);
+    const assets = (await Promise.all(page.map((rel) => describeAsset(root, rel, origin, sidecarRoot, token)))).filter(Boolean);
     const nextOffset = offset + limit;
     const nextCursor = nextOffset < rels.length
         ? Buffer.from(JSON.stringify({ offset: nextOffset }), 'utf8').toString('base64url')
@@ -210,10 +220,10 @@ async function handleList(url, root, sidecarRoot, origin, res, cors) {
     sendJson(res, 200, { assets, nextCursor }, cors);
 }
 
-async function handleSingle(root, sidecarRoot, id, origin, res, cors) {
+async function handleSingle(root, sidecarRoot, id, origin, token, res, cors) {
     const rel = decodeId(id);
     if (rel === null) { sendJson(res, 400, { error: 'bad id' }, cors); return; }
-    const asset = await describeAsset(root, rel, origin, sidecarRoot);
+    const asset = await describeAsset(root, rel, origin, sidecarRoot, token);
     if (!asset) { sendJson(res, 404, { error: 'no such asset' }, cors); return; }
     sendJson(res, 200, asset, cors);
 }
