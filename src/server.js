@@ -29,6 +29,9 @@ import {
     saveRecipe,
     loadRecipe,
     saveRender,
+    saveRating,
+    loadRating,
+    encodeId,
     decodeId,
     defaultSidecarRoot,
 } from './library.js';
@@ -128,7 +131,7 @@ export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kin
                     schemaVersion: SCHEMA_VERSION,
                     root,
                     kind,
-                    endpoints: ['/assets', '/assets/{id}', '/assets/{id}/raw', '/assets/{id}/thumb', '/assets/{id}/recipe',
+                    endpoints: ['/assets', '/assets/{id}', '/assets/{id}/raw', '/assets/{id}/thumb', '/assets/{id}/recipe', 'POST /assets/{id}/rating',
                         '/hdrtoys/callback/snapshot', '/hdrtoys/callback/render', '/hdrtoys/callback/capabilities'],
                 }, cors);
                 return;
@@ -158,6 +161,12 @@ export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kin
                 }
                 if (req.method === 'GET' && sub === 'recipe' && segs.length === 3) {
                     await handleRecipeGet(sidecarRoot, id, res, cors);
+                    return;
+                }
+                // POST /assets/{id}/rating — §3.6 star/flag write (was missing; the editor's
+                // rating POST 404'd here, so desktop stars silently reverted).
+                if (req.method === 'POST' && sub === 'rating' && segs.length === 3) {
+                    await handleRatingPost(req, sidecarRoot, id, res, cors, maxSnapshotBytes);
                     return;
                 }
             }
@@ -208,8 +217,26 @@ async function handleList(url, root, sidecarRoot, origin, token, res, cors) {
         ? new Set(kindParam.split(',').map((k) => k.trim().toLowerCase()).filter(Boolean))
         : null;
 
+    // Optional `rating_gte` (min stars) + `flag` filters (§3.1 / §3.6). Read the per-asset
+    // rating sidecar only when a filter is active, then apply before pagination so the cursor
+    // stays consistent across the filtered set.
+    const ratingGte = Number(url.searchParams.get('rating_gte'));
+    const flagParam = url.searchParams.get('flag');
+    const flagFilter = flagParam && flagParam !== 'any' ? flagParam : null;
+    const ratingFilter = Number.isFinite(ratingGte) && ratingGte > 0 ? ratingGte : null;
+
     let rels = await scanLibrary(root);
     if (kinds && kinds.size) rels = rels.filter((rel) => kinds.has(kindOf(rel)));
+    if (ratingFilter || flagFilter) {
+        const filtered = [];
+        for (const rel of rels) {
+            const r = await loadRating(sidecarRoot, encodeId(rel));
+            if (ratingFilter && (r?.rating ?? 0) < ratingFilter) continue;
+            if (flagFilter && (r?.flag ?? null) !== flagFilter) continue;
+            filtered.push(rel);
+        }
+        rels = filtered;
+    }
     const page = rels.slice(offset, offset + limit);
     const assets = (await Promise.all(page.map((rel) => describeAsset(root, rel, origin, sidecarRoot, token)))).filter(Boolean);
     const nextOffset = offset + limit;
@@ -323,6 +350,28 @@ async function handleRecipeGet(sidecarRoot, id, res, cors) {
         schemaVersion: envelope.schemaVersion ?? SCHEMA_VERSION,
         recipe: envelope.recipe ?? envelope,
     }, cors);
+}
+
+async function handleRatingPost(req, sidecarRoot, id, res, cors, maxBytes) {
+    if (decodeId(id) === null) { sendJson(res, 400, { error: 'bad id' }, cors); return; }
+    let body;
+    try {
+        body = await readBody(req, maxBytes);
+    } catch {
+        sendJson(res, 413, { error: 'rating too large' }, cors);
+        return;
+    }
+    let parsed;
+    try {
+        parsed = JSON.parse(body.toString('utf8') || '{}');
+    } catch {
+        sendJson(res, 400, { error: 'invalid json' }, cors);
+        return;
+    }
+    // {rating?:0-5, flag?:'pick'|'reject'|null, seq?, clientId?} — partial; omitted fields keep.
+    await saveRating(sidecarRoot, id, parsed);
+    res.writeHead(204, cors);
+    res.end();
 }
 
 async function handleSnapshot(req, sidecarRoot, res, cors, maxBytes) {

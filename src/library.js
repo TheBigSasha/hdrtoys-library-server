@@ -145,6 +145,10 @@ export async function describeAsset(root, relPath, origin, sidecarRoot, token) {
         editedByHdrToys = true;
     } catch { /* no recipe yet */ }
 
+    // Rating / flag (§3.6 / annotate): stored alongside the recipe in the sidecar so the
+    // in-editor stars + rating filter reflect it on every list/single read.
+    const rating = await loadRating(sidecarRoot, id);
+
     // When a token is configured, bake it into the asset URLs as a query param.
     // The editor loads thumbnails via <img src> and downloads via plain GETs that
     // can't carry an Authorization header, so the token has to travel in the URL
@@ -163,6 +167,8 @@ export async function describeAsset(root, relPath, origin, sidecarRoot, token) {
         capturedAt: stat.mtime.toISOString(),
         editedByHdrToys,
         bytes: stat.size,
+        rating: rating?.rating ?? 0,
+        ...(rating?.flag ? { flag: rating.flag } : {}),
     };
 }
 
@@ -212,6 +218,38 @@ export async function loadRecipe(sidecarRoot, id) {
     try {
         const raw = await fs.readFile(recipeFilePath(sidecarRoot, id), 'utf8');
         return JSON.parse(raw);
+    } catch {
+        return null;
+    }
+}
+
+export function ratingFilePath(sidecarRoot, id) {
+    return path.join(sidecarRoot, `${id}.rating.json`);
+}
+
+/** Persist an asset's rating/flag (§3.6 / annotate), seq-monotonic like recipes. `rating`
+ *  absent ⇒ stars untouched; `flag` absent ⇒ flag untouched; explicit null clears. */
+export async function saveRating(sidecarRoot, id, { rating, flag, seq, clientId } = {}) {
+    const file = ratingFilePath(sidecarRoot, id);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    let prev = {};
+    try { prev = JSON.parse(await fs.readFile(file, 'utf8')) || {}; } catch { /* none */ }
+    if (clientId != null && prev.clientId === clientId && Number(prev.seq ?? -1) >= Number(seq ?? 0)) {
+        return { stored: false, reason: 'stale-seq' };
+    }
+    const next = { ...prev };
+    if (rating !== undefined) next.rating = rating === null ? 0 : Math.max(0, Math.min(5, Math.round(rating)));
+    if (flag !== undefined) next.flag = flag; // null clears
+    if (seq != null) next.seq = seq;
+    if (clientId != null) next.clientId = clientId;
+    await fs.writeFile(file, JSON.stringify(next, null, 2), 'utf8');
+    return { stored: true };
+}
+
+/** Read the stored {rating, flag} for an asset, or null if none. */
+export async function loadRating(sidecarRoot, id) {
+    try {
+        return JSON.parse(await fs.readFile(ratingFilePath(sidecarRoot, id), 'utf8'));
     } catch {
         return null;
     }
