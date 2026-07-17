@@ -29,6 +29,24 @@ const MIME_BY_EXT = {
 /** The sidecar folder (inside the library root) where recipes/renders live. */
 export const SIDECAR_DIR = '.hdrtoys';
 
+// Persisted edit-thumbnail suffix (full-filename form). After a library image is
+// opened/edited, the freshest small preview is written BESIDE the original as
+// `<sourceFilename>.edit_thumbnail.jpg` — the whole suffix appends to the WHOLE
+// filename INCLUDING its extension, so a RAW+JPEG stem pair (IMG.ARW / IMG.JPG)
+// can never collide on one sidecar (naming law, ultrahdrutil #783 / PR #608 F8).
+// e.g. IMG_5501.ARW → IMG_5501.ARW.edit_thumbnail.jpg.
+//
+// Exclusion law (ultrahdrutil #798): a persisted edit thumbnail is a Layer-6
+// disposable T1 artifact, NEVER an ingestable asset — the folder scan must skip
+// it (see scanLibrary) so it can't show up in the filmstrip as its own photo.
+export const EDIT_THUMBNAIL_SUFFIX = '.edit_thumbnail.jpg';
+
+/** True if `name` is a persisted edit-thumbnail sidecar (case-insensitive suffix
+ *  match; a bare `.edit_thumbnail.jpg` with an empty base name matches too). */
+export function isEditThumbnailSidecar(name) {
+    return name.toLowerCase().endsWith(EDIT_THUMBNAIL_SUFFIX);
+}
+
 function extOf(name) {
     const dot = name.lastIndexOf('.');
     return dot < 0 ? '' : name.slice(dot + 1).toLowerCase();
@@ -114,7 +132,11 @@ export async function scanLibrary(root) {
             const childRel = rel ? path.join(rel, entry.name) : entry.name;
             if (entry.isDirectory()) {
                 await walk(path.join(dir, entry.name), childRel);
-            } else if (entry.isFile() && isSupportedImage(entry.name)) {
+            } else if (entry.isFile() && isSupportedImage(entry.name) && !isEditThumbnailSidecar(entry.name)) {
+                // Skip persisted edit-thumbnail sidecars — they're .jpg (a supported
+                // type) but they are previews OF an asset, not assets (ultrahdrutil
+                // #798 exclusion law). Orphans (no matching source) are dropped here
+                // too: unlisted → never served, so they're ignored entirely.
                 out.push(childRel);
             }
         }
@@ -215,6 +237,41 @@ export async function loadRecipe(sidecarRoot, id) {
     } catch {
         return null;
     }
+}
+
+// --- persisted edit thumbnail (beside-original preview) ---
+//
+// Unlike recipes/renders (which live in the sidecar folder), the edit thumbnail
+// lives BESIDE its source using the full-filename law, so a folder scan finds it
+// by the source path and the /thumb route can serve it as the freshest preview
+// (ultrahdrutil #783 / #798). It is written for a plainly-served folder only —
+// a read-only macOS Photos package is refused by the route (never mutated).
+
+/** Absolute path of the edit-thumbnail sidecar written beside a source file:
+ *  `/lib/IMG.ARW` → `/lib/IMG.ARW.edit_thumbnail.jpg` (whole suffix on the whole
+ *  filename, extension included — see EDIT_THUMBNAIL_SUFFIX). */
+export function editThumbnailPath(absSourcePath) {
+    return absSourcePath + EDIT_THUMBNAIL_SUFFIX;
+}
+
+/** Atomically persist the edit thumbnail beside `absSourcePath` (temp file in the
+ *  same directory + rename, so a reader never sees a half-written preview and a
+ *  crash mid-write can't corrupt a prior good one). Returns the written path;
+ *  throws on write failure (EROFS/EACCES/ENOSPC/… — the caller maps to 507). */
+export async function saveEditThumbnail(absSourcePath, bytes) {
+    const dest = editThumbnailPath(absSourcePath);
+    const dir = path.dirname(dest);
+    // Hidden temp name in the SAME dir (same filesystem → rename is atomic). The
+    // leading dot keeps it out of the scan even if a write dies before the rename.
+    const tmp = path.join(dir, `.${path.basename(dest)}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    try {
+        await fs.writeFile(tmp, bytes);
+        await fs.rename(tmp, dest);
+    } catch (err) {
+        try { await fs.unlink(tmp); } catch { /* best-effort cleanup */ }
+        throw err;
+    }
+    return dest;
 }
 
 /** Save a rendered image into the sidecar (§2.2). Returns the written path. */
