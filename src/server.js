@@ -7,6 +7,7 @@
 //   GET  /assets/{id}                   → §3.2 single asset
 //   GET  /assets/{id}/raw               → §3.3 original bytes (also thumbnail fallback)
 //   GET  /assets/{id}/recipe            → §3.4 latest recipe ({schemaVersion,recipe}) | 404
+//   POST /assets/{id}/edit_thumbnail    → persist `<file>.edit_thumbnail.jpg` beside the original (#783/#798)
 //   POST /hdrtoys/callback/snapshot     → §2.1 store latest recipe (seq-monotonic)
 //   POST /hdrtoys/callback/render       → §2.2 save rendered image (multipart)
 //   GET  /hdrtoys/callback/capabilities → §2.5 capability handshake
@@ -29,6 +30,8 @@ import {
     saveRecipe,
     loadRecipe,
     saveRender,
+    editThumbnailPath,
+    saveEditThumbnail,
     decodeId,
     defaultSidecarRoot,
 } from './library.js';
@@ -44,7 +47,9 @@ function corsHeaders(allowOrigin) {
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers':
             'Authorization, Content-Type, X-HDRToys-Image-Id, X-HDRToys-Channel, X-HDRToys-Schema-Version',
-        'Access-Control-Expose-Headers': 'Content-Disposition',
+        // X-HDRT-Tier-Source lets a fetch caller read which thumbnail tier served
+        // the bytes (e.g. 'edit-thumbnail' for a persisted edit preview).
+        'Access-Control-Expose-Headers': 'Content-Disposition, X-HDRT-Tier-Source',
         'Access-Control-Max-Age': '86400',
         // hdr.toys sets COEP: require-corp (for SharedArrayBuffer/WASM). Under
         // that policy a cross-origin <img> (a no-cors subresource load) is
@@ -92,9 +97,9 @@ async function readBody(req, limitBytes) {
  *   token        optional bearer token; when set, every request must carry it
  *   allowOrigin  CORS Allow-Origin value (default '*')
  *   systemThumbnails  use OS thumbnails (QuickLook/Shell/gdk) for previews (default true)
- *   maxSnapshotBytes / maxRenderBytes  request body caps
+ *   maxSnapshotBytes / maxRenderBytes / maxEditThumbnailBytes  request body caps
  */
-export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kind = 'folder', token = null, allowOrigin = '*', systemThumbnails = true, maxSnapshotBytes = 16 * 1024 * 1024, maxRenderBytes = 256 * 1024 * 1024 }) {
+export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kind = 'folder', token = null, allowOrigin = '*', systemThumbnails = true, maxSnapshotBytes = 16 * 1024 * 1024, maxRenderBytes = 256 * 1024 * 1024, maxEditThumbnailBytes = 2 * 1024 * 1024 }) {
     const cors = corsHeaders(allowOrigin);
 
     return http.createServer(async (req, res) => {
@@ -129,6 +134,7 @@ export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kin
                     root,
                     kind,
                     endpoints: ['/assets', '/assets/{id}', '/assets/{id}/raw', '/assets/{id}/thumb', '/assets/{id}/recipe',
+                        'POST /assets/{id}/edit_thumbnail',
                         '/hdrtoys/callback/snapshot', '/hdrtoys/callback/render', '/hdrtoys/callback/capabilities'],
                 }, cors);
                 return;
@@ -158,6 +164,13 @@ export function createServer({ root, sidecarRoot = defaultSidecarRoot(root), kin
                 }
                 if (req.method === 'GET' && sub === 'recipe' && segs.length === 3) {
                     await handleRecipeGet(sidecarRoot, id, res, cors);
+                    return;
+                }
+                // POST /assets/{id}/edit_thumbnail — persist the freshest edit
+                // preview beside the original (ultrahdrutil #783 / #798). Auth is the
+                // same bearer check every route already passed above (checkAuth).
+                if (req.method === 'POST' && sub === 'edit_thumbnail' && segs.length === 3) {
+                    await handleEditThumbnail(req, root, id, kind, res, cors, maxEditThumbnailBytes);
                     return;
                 }
             }
@@ -251,6 +264,8 @@ async function handleRaw(root, id, res, cors) {
 
 // GET /assets/{id}/thumb — a small, browser-renderable preview, served INLINE
 // (no attachment disposition, so it renders in an <img>). Priority:
+//   0. edit thumbnail → the persisted `<file>.edit_thumbnail.jpg` beside the
+//                       original (freshest edit preview; wins over caches),
 //   1. cached thumbnail (generated once, reused),
 //   2. RAW           → the JPEG preview embedded in the file,
 //   3. system        → the OS thumbnail (QuickLook / Shell / gdk-pixbuf),
@@ -277,6 +292,24 @@ async function handleThumb(root, sidecarRoot, id, res, cors, systemThumbnails) {
         return;
     }
     const name = path.basename(abs);
+
+    // 0. Persisted edit thumbnail beside the original — the FRESHEST preview,
+    //    baked from the latest edit, so it wins over any older cached RAW/system
+    //    thumbnail (ultrahdrutil #783 / #798). Orphans never reach here: `abs`
+    //    (the source) is stat'd above, so a sidecar with no source 404s first.
+    try {
+        const bytes = await fs.readFile(editThumbnailPath(abs));
+        res.writeHead(200, {
+            ...cors,
+            'Content-Type': 'image/jpeg',
+            'Content-Length': String(bytes.length),
+            // Freshest preview: don't let a stale copy survive the next re-edit.
+            'Cache-Control': 'private, max-age=0, must-revalidate',
+            'X-HDRT-Tier-Source': 'edit-thumbnail',
+        });
+        res.end(bytes);
+        return;
+    } catch { /* no edit thumbnail — fall through to the normal thumbnail tiers */ }
 
     // 1. Already generated? Serve the cached thumbnail.
     const cached = await readCachedThumb(sidecarRoot, id);
@@ -323,6 +356,68 @@ async function handleRecipeGet(sidecarRoot, id, res, cors) {
         schemaVersion: envelope.schemaVersion ?? SCHEMA_VERSION,
         recipe: envelope.recipe ?? envelope,
     }, cors);
+}
+
+// POST /assets/{id}/edit_thumbnail — persist a small JPEG preview (the freshest
+// edit thumbnail) BESIDE the original as `<sourceFilename>.edit_thumbnail.jpg`
+// (full-filename law: the suffix appends to the WHOLE filename incl. its
+// extension, so a RAW+JPEG stem pair never shares one sidecar — ultrahdrutil
+// #783 / #798). Body is raw JPEG bytes. Auth is the shared bearer check every
+// route already passed (checkAuth): a missing/invalid token 401'd before routing
+// here, matching the render/snapshot write posture.
+async function handleEditThumbnail(req, root, id, kind, res, cors, maxBytes) {
+    const abs = resolveAssetPath(root, id);
+    if (!abs) { sendJson(res, 400, { error: 'bad id' }, cors); return; }
+
+    // The source must exist — an edit thumbnail is meaningless (and never served)
+    // without it. Unknown id → 404.
+    try {
+        await fs.stat(abs);
+    } catch {
+        sendJson(res, 404, { error: 'no such asset' }, cors);
+        return;
+    }
+
+    // A read-only macOS Photos package is NEVER written to (photos.js invariant).
+    // Beside-original is impossible there, so refuse honestly rather than mutate
+    // the library — recipes/renders use the external sidecar, but an edit
+    // thumbnail must live beside its source (naming law) to be found on scan.
+    if (kind === 'macos-photos') {
+        sendJson(res, 507, { error: 'read-only library', detail: 'edit thumbnails cannot be written into a read-only macOS Photos library' }, cors);
+        return;
+    }
+
+    let body;
+    try {
+        body = await readBody(req, maxBytes);
+    } catch {
+        sendJson(res, 413, { error: 'edit thumbnail too large' }, cors);
+        return;
+    }
+    // Must be a JPEG (SOI marker FF D8 FF). Guards against an empty/garbled POST
+    // silently persisting a broken preview that would then win on /thumb.
+    if (body.length < 3 || body[0] !== 0xff || body[1] !== 0xd8 || body[2] !== 0xff) {
+        sendJson(res, 400, { error: 'not a jpeg' }, cors);
+        return;
+    }
+
+    let written;
+    try {
+        written = await saveEditThumbnail(abs, body);
+    } catch (err) {
+        // Read-only filesystem / no space / permission denied → honest 507; any
+        // other write failure → 500. The original is never touched either way.
+        const code = err?.code;
+        if (code === 'EROFS' || code === 'EACCES' || code === 'EPERM' || code === 'ENOSPC') {
+            sendJson(res, 507, { error: 'cannot write edit thumbnail', detail: String(err.message || err) }, cors);
+        } else {
+            sendJson(res, 500, { error: 'internal', detail: String(err?.message || err) }, cors);
+        }
+        return;
+    }
+    // 200 (not 201): a re-edit overwrites in place, so this is "stored", not
+    // strictly "created". `saved` is the sidecar's basename for logging/asserts.
+    sendJson(res, 200, { ok: true, saved: path.basename(written) }, cors);
 }
 
 async function handleSnapshot(req, sidecarRoot, res, cors, maxBytes) {
