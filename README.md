@@ -34,6 +34,7 @@ The protocol's minimum self-hostable subset
 | `GET /assets/{id}/thumb` (renderable preview) | §3.1 `thumbnailUrl` | ✅ |
 | `GET /assets?kind=raw` (filter by kind) | §3.1 | ✅ |
 | `GET /assets/{id}/recipe` (restore edit) | §3.4 | ✅ |
+| `POST /assets/{id}/edit_thumbnail` (persist edit preview) | — | ✅ |
 | `POST /hdrtoys/callback/snapshot` (save edit) | §2.1 | ✅ (seq-monotonic) |
 | `POST /hdrtoys/callback/render` (save export) | §2.2 | ✅ |
 | `GET /hdrtoys/callback/capabilities` | §2.5 | ✅ |
@@ -41,8 +42,21 @@ The protocol's minimum self-hostable subset
 
 **Thumbnails.** `thumbnailUrl` points at `GET /assets/{id}/thumb`, which returns
 a small, browser-renderable preview **inline** (no forced download). It tries,
-in order: a cached thumbnail → the RAW embedded preview → an **OS "system"
-thumbnail** → the original bytes.
+in order: a **persisted edit thumbnail** (see below) → a cached thumbnail → the
+RAW embedded preview → an **OS "system" thumbnail** → the original bytes.
+
+**Edit thumbnails.** After you open or edit a photo, hdr.toys can push back a
+tiny rendered preview via `POST /assets/{id}/edit_thumbnail` (raw JPEG bytes,
+same optional bearer token as the other writes). The server stores it **beside
+the original** as `<sourceFilename>.edit_thumbnail.jpg` — the whole suffix is
+appended to the whole filename *including its extension* (`IMG_5501.ARW` →
+`IMG_5501.ARW.edit_thumbnail.jpg`), so a RAW + JPEG pair sharing a stem never
+collide. These sidecars are **never listed as assets** and, when present, become
+the freshest preview `/thumb` serves (a RAW no longer needs its embedded preview
+re-extracted). Writes are atomic (temp file + rename), capped at ~2 MB, and
+refused (`507`) on a read-only library such as a macOS Photos package — the
+package is never mutated. This is the desktop/server counterpart of hdr.toys'
+browser File-System-Access edit-thumbnail write-back.
 
 - **RAW** (`.arw/.cr2/.cr3/.nef/.dng/…`) → the JPEG preview **embedded** in the
   file, extracted with a zero-dep marker scan and cached at
@@ -249,6 +263,9 @@ that with `--dir`. Edits then land in that folder's own `.hdrtoys/` sidecar.
 - **Thumbnail cache** → `<sidecar>/<id>.thumb.jpg` (RAW embedded preview) or
   `<sidecar>/<id>.systhumb.png` (OS thumbnail); safe to delete, regenerated on
   demand.
+- **Edit thumbnails** → `<sourceFilename>.edit_thumbnail.jpg` written **beside
+  the original** (not in the sidecar folder), so the scan finds it by the source
+  path. Safe to delete; the source is never touched.
 - **Sidecar location.** For a plain folder it's `<root>/.hdrtoys/`. For a macOS
   Photos library it's `<library-name>.photoslibrary.hdrtoys/` *beside* the
   package, so the library itself stays untouched.
