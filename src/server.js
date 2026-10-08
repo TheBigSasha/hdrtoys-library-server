@@ -317,7 +317,7 @@ async function handleThumb(root, sidecarRoot, id, res, cors, systemThumbnails) {
 
     // 2. RAW → embedded JPEG preview (fast, dependency-free; rawThumbnail caches it).
     if (isRawImage(name)) {
-        const bytes = await rawThumbnail(abs, sidecarRoot, id);
+        const bytes = await rawThumbnail(abs, sidecarRoot, id, { skipCacheRead: true });
         if (bytes) { serveThumb(res, cors, 'image/jpeg', bytes); return; }
     }
 

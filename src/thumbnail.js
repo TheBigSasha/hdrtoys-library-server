@@ -11,39 +11,25 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { extractEmbeddedJpegContainer, isCompleteJpegContainer } from './jpegContainer.js';
 
 /**
- * Find the largest embedded JPEG inside a buffer (e.g. a RAW file's preview).
- *
- * Scan for every SOI marker (FF D8 FF). For each, the candidate JPEG spans from
- * that SOI up to the *last* EOI (FF D9) before the next SOI — bounding by the
- * next SOI avoids truncating at an inner EXIF-thumbnail's EOI. The biggest such
- * span is the main preview. Returns a Buffer (a view into `buf`) or null.
+ * Find the largest structurally complete embedded JPEG container in a RAW
+ * buffer. APP payloads, progressive scans, entropy stuffing, and MPF-indexed
+ * images are kept byte-for-byte; data after the actual image extent is excluded.
+ * Returns a Buffer view into `buf`, or null when no complete candidate exists.
  */
 export function extractEmbeddedJpeg(buf) {
-    const sois = [];
-    for (let i = 0; i < buf.length - 2; i++) {
-        if (buf[i] === 0xff && buf[i + 1] === 0xd8 && buf[i + 2] === 0xff) sois.push(i);
-    }
-    let best = null;
-    for (let k = 0; k < sois.length; k++) {
-        const start = sois[k];
-        const limit = k + 1 < sois.length ? sois[k + 1] : buf.length;
-        let lastEoi = -1;
-        for (let j = start + 2; j < limit - 1; j++) {
-            if (buf[j] === 0xff && buf[j + 1] === 0xd9) lastEoi = j + 2;
-        }
-        if (lastEoi > 0) {
-            const len = lastEoi - start;
-            if (!best || len > best.len) best = { start, end: lastEoi, len };
-        }
-    }
-    if (!best) return null;
-    return buf.subarray(best.start, best.end);
+    return extractEmbeddedJpegContainer(buf);
 }
 
-/** Where a RAW file's extracted preview is cached (one JPEG per asset id). */
+/** Current versioned cache path; older cache bytes remain available as evidence. */
 export function thumbCachePath(sidecarRoot, id) {
+    return path.join(sidecarRoot, `${id}.thumb-v2.jpg`);
+}
+
+/** Original unversioned cache path, retained for read-only compatibility checks. */
+export function legacyThumbCachePath(sidecarRoot, id) {
     return path.join(sidecarRoot, `${id}.thumb.jpg`);
 }
 
@@ -58,8 +44,13 @@ export function sysThumbCachePath(sidecarRoot, id) {
  * is generated at most once per file.
  */
 export async function readCachedThumb(sidecarRoot, id) {
-    const jpg = thumbCachePath(sidecarRoot, id);
-    try { return { bytes: await fs.readFile(jpg), contentType: 'image/jpeg' }; } catch { /* none */ }
+    for (const jpg of [thumbCachePath(sidecarRoot, id), legacyThumbCachePath(sidecarRoot, id)]) {
+        try {
+            const bytes = await fs.readFile(jpg);
+            if (isCompleteJpegContainer(bytes)) return { bytes, contentType: 'image/jpeg' };
+            // Keep malformed/old bytes untouched. A RAW request can regenerate a versioned cache.
+        } catch { /* none */ }
+    }
     const png = sysThumbCachePath(sidecarRoot, id);
     try { return { bytes: await fs.readFile(png), contentType: 'image/png' }; } catch { /* none */ }
     return null;
@@ -78,11 +69,17 @@ export async function cacheSysThumb(sidecarRoot, id, bytes) {
  * otherwise extract it from the RAW, cache it, and return the bytes. Returns a
  * Buffer (image/jpeg) or null if no embedded preview could be found.
  */
-export async function rawThumbnail(absRawPath, sidecarRoot, id) {
+export async function rawThumbnail(absRawPath, sidecarRoot, id, { skipCacheRead = false } = {}) {
     const cache = thumbCachePath(sidecarRoot, id);
-    try {
-        return await fs.readFile(cache);
-    } catch { /* not cached yet — extract below */ }
+    if (!skipCacheRead) {
+        for (const cachedPath of [cache, legacyThumbCachePath(sidecarRoot, id)]) {
+            try {
+                const cached = await fs.readFile(cachedPath);
+                if (isCompleteJpegContainer(cached)) return cached;
+                // Never serve or overwrite an invalid legacy cache during migration.
+            } catch { /* not cached yet — extract below */ }
+        }
+    }
 
     let raw;
     try {
